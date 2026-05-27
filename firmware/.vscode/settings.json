@@ -1,4 +1,18 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
-  "idf.extensionActivationMode": "always"
+  "idf.extensionActivationMode": "always",
+  "idf.currentSetup": "C:\\esp\\v6.0.1\\esp-idf",
+  "idf.openOcdConfigs": [
+    "interface/ftdi/esp32_devkitj_v1.cfg",
+    "target/esp32.cfg"
+  ],
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32"
+  },
+  "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-20.1.1_20250829\\esp-clang\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=c:\\Users\\umota\\Documents\\3-faculdade\\IPB\\3-Internet of things\\iot-tracking-system\\firmware\\build"
+  ]
 }
