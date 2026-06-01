@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "command_interface_events.h"
 #include "command_interface.h"
+#include "system_api.h"
 #include "gps.h"
 
 #include "esp_log.h"
@@ -54,6 +55,7 @@ void app_main(void)
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   ESP_ERROR_CHECK(command_interface_initialization());
   ESP_ERROR_CHECK(wifi_initialization());
+  ESP_ERROR_CHECK(system_api_initialization());
 
   ESP_ERROR_CHECK(
     esp_event_handler_register(

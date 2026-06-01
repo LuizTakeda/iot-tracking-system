@@ -1,0 +1,22 @@
+menu "System API - MQTT Configuration"
+
+    config SYSTEM_API_MQTT_BROKER_URL
+        string "MQTT Broker URL"
+        default "mqtts://test.mosquitto.org:8886"
+        help
+            MQTT broker URL for connection.
+            Example: mqtts://broker.example.com:8886
+
+    config SYSTEM_API_MQTT_USERNAME
+        string "MQTT Username"
+        default ""
+        help
+            Username for authentication with the MQTT broker.
+
+    config SYSTEM_API_MQTT_PASSWORD
+        string "MQTT Password"
+        default ""
+        help
+            Password for authentication with the MQTT broker.
+
+endmenu
