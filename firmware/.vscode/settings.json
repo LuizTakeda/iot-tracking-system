@@ -14,5 +14,7 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Users\\umota\\Documents\\3-faculdade\\IPB\\3-Internet of things\\iot-tracking-system\\firmware\\build"
-  ]
+  ],
+  "idf.flashType": "UART",
+  "idf.portWin": "COM6"
 }

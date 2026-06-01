@@ -1,0 +1,28 @@
+dependencies:
+  cinderblocks/esp_tinygpsplusplus:
+    component_hash: 4dd01357b3536696b0e3132dd68cbbd9a41536f9618cb65eec9c86efaedab76f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32s3
+    - esp32s2
+    - esp32
+    - esp32c3
+    - esp32c6
+    - esp32h2
+    version: 1.1.1
+  idf:
+    source:
+      type: idf
+    version: 6.0.1
+direct_dependencies:
+- cinderblocks/esp_tinygpsplusplus
+- idf
+manifest_hash: d789b6b032614c5faa33fb60de08b580b333173b1dae5b4dad6c0e4e55494d9a
+target: esp32
+version: 3.0.0

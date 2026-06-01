@@ -2,4 +2,8 @@
 
 #include "esp_err.h"
 
-esp_err_t systema_api_initialization();
+//**************************************************
+// Public Functions
+//**************************************************
+
+esp_err_t system_api_initialization();

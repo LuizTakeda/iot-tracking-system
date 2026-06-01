@@ -1,12 +1,27 @@
 #include <stdio.h>
 #include "command_interface.h"
-#include "wifi_config.h"
-#include "system_api.h"
 #include "gps.h"
 
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "esp_err.h"
 
+//**************************************************
+// Defines
+//**************************************************
 
-void app_main(void)
-{
+//**************************************************
+// Globals
+//**************************************************
 
+//**************************************************
+// Public Functions
+//**************************************************
+
+void app_main(void) {
+    ESP_ERROR_CHECK(command_interface_initialization());
 }
+
+//**************************************************
+// Private Functions
+//**************************************************
