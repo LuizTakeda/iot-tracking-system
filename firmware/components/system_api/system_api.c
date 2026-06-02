@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include "system_api_events.h"
 #include "system_api.h"
 #include "esp_crt_bundle.h"
 #include "mqtt_client.h"
@@ -9,6 +8,8 @@
 #include "esp_netif_sntp.h"
 #include "esp_timer.h"
 #include <time.h>
+
+#include "gps_events.h"
 
 //**************************************************
 // Defines
@@ -30,6 +31,9 @@ static esp_mqtt_client_handle_t s_client = NULL;
 
 static bool s_is_connected = false;
 
+static bool s_mqtt_ready = false;
+static bool s_time_ready = false;
+
 //**************************************************
 // Function Prototypes
 //**************************************************
@@ -41,6 +45,8 @@ static void time_sync_cb(struct timeval *tv);
 static void sntp_sync_task(void *pvParameters);
 static uint32_t system_uptime_s();
 static void publish_device_info(void);
+static bool system_time_is_valid(void);
+static void gps_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 
 //**************************************************
 // Public Functions
@@ -81,13 +87,32 @@ esp_err_t system_api_initialization()
   setenv("TZ", "WET0WEST,M3.5.0/1,M10.5.0", 1);
   tzset();
 
-  ESP_ERROR_CHECK(esp_mqtt_client_register_event(s_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
+  ESP_ERROR_CHECK(esp_mqtt_client_register_event(
+      s_client,
+      ESP_EVENT_ANY_ID,
+      mqtt_event_handler,
+      NULL));
 
-  ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                      ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      WIFI_EVENT,
+      ESP_EVENT_ANY_ID,
+      &wifi_event_handler,
+      NULL,
+      NULL));
 
-  ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                      IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL, NULL));
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      IP_EVENT,
+      IP_EVENT_STA_GOT_IP,
+      &ip_event_handler,
+      NULL,
+      NULL));
+
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      GPS_EVENT,
+      GPS_EVENT_DATA_READY,
+      &gps_event_handler,
+      NULL,
+      NULL));
 
   return ESP_OK;
 }
@@ -96,19 +121,34 @@ esp_err_t system_api_initialization()
 // Private Functions
 //**************************************************
 
+static bool system_time_is_valid(void)
+{
+  time_t now;
+  time(&now);
+
+  return now > 1700000000;
+}
+
 static void time_sync_cb(struct timeval *tv)
 {
   ESP_LOGI(TAG, "Tempo sincronizado!");
+
+  s_time_ready = true;
 
   time_t now;
   struct tm timeinfo;
   char buffer[64];
 
-  time(&now); // pega o tempo APÓS sincronização
+  time(&now);
   localtime_r(&now, &timeinfo);
   strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
 
   ESP_LOGI(TAG, "Data/Hora: %s", buffer);
+
+  if (s_mqtt_ready)
+  {
+    publish_device_info();
+  }
 }
 
 static void sntp_sync_task(void *pvParameters)
@@ -125,11 +165,17 @@ static void sntp_sync_task(void *pvParameters)
   if (retry == retry_count)
   {
     ESP_LOGE(TAG, "Falha ao sincronizar tempo via SNTP!");
-    // Trate o erro aqui
+    s_time_ready = false;
   }
   else
   {
     ESP_LOGI(TAG, "Tempo sincronizado com sucesso!");
+    s_time_ready = true;
+
+    if (s_mqtt_ready)
+    {
+      publish_device_info();
+    }
   }
 
   vTaskDelete(NULL); // deleta a task ao finalizar
@@ -199,11 +245,23 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
   {
   case MQTT_EVENT_CONNECTED:
     s_is_connected = true;
+    s_mqtt_ready = true;
+
     ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
-    msg_id = esp_mqtt_client_publish(client, "/tracking_device/tracking-one/status", "{\"online\": true}", 0, 1, true);
+
+    msg_id = esp_mqtt_client_publish(
+        client,
+        "/tracking_device/" CONFIG_DEVICE_ID "/status",
+        "{\"online\": true}",
+        0, 1, true);
+
     ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
 
-    publish_device_info();
+    if (s_time_ready)
+    {
+      publish_device_info();
+    }
+
     break;
 
   case MQTT_EVENT_DISCONNECTED:
@@ -235,6 +293,12 @@ static uint32_t system_uptime_s()
 
 static void publish_device_info(void)
 {
+  if (!system_time_is_valid())
+  {
+    ESP_LOGW(TAG, "Skipping device info publish, time not synchronized");
+    return;
+  }
+
   char ip[16] = "0.0.0.0";
 
   esp_netif_ip_info_t ip_info;
@@ -280,4 +344,75 @@ static void publish_device_info(void)
       0,
       1,
       true);
+}
+
+static void gps_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+  if (base != GPS_EVENT)
+  {
+    return;
+  }
+
+  if (!s_is_connected)
+  {
+    ESP_LOGW(TAG, "Not connected");
+    return;
+  }
+
+  if (!system_time_is_valid())
+  {
+    ESP_LOGW(TAG, "Skipping publish, time not synchronized");
+    return;
+  }
+
+  switch (event_id)
+  {
+  case GPS_EVENT_DATA_READY:
+  {
+    gps_data_ready_payload_t *data = (gps_data_ready_payload_t *)event_data;
+
+    char topic[128];
+    snprintf(topic, sizeof(topic), "/tracking_device/" CONFIG_DEVICE_ID "/state");
+
+    char payload[512];
+    time_t now;
+    time(&now);
+    snprintf(payload,
+             sizeof(payload),
+             "{"
+             "\"latitude\":%.8f,"
+             "\"longitude\":%.8f,"
+             "\"altitude\":%.2f,"
+             "\"speed_kmh\":%.2f,"
+             "\"course_deg\":%.2f,"
+             "\"satellites\":%lu,"
+             "\"hdop\":%.2ld,"
+             "\"timestamp\":%lld,"
+             "\"time_on\":%lu"
+             "}",
+             data->latitude,
+             data->longitude,
+             data->altitude,
+             data->speed_kmh,
+             data->course_deg,
+             (unsigned long)data->satellites,
+             data->hdop,
+             (long long)now,
+             system_uptime_s());
+
+    esp_mqtt_client_publish(
+        s_client,
+        topic,
+        payload,
+        0,
+        0,
+        false);
+
+    ESP_LOGD(TAG, "Published state");
+  }
+  break;
+
+  default:
+    break;
+  }
 }

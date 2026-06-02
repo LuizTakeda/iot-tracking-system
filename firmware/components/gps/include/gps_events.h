@@ -3,7 +3,7 @@
 #include "esp_event.h"
 #include <time.h>
 
-ESP_EVENT_DECLARE_BASE(GPS_EVENTS);
+ESP_EVENT_DECLARE_BASE(GPS_EVENT);
 
 //**************************************************
 // Events

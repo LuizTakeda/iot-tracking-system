@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include "gps.h"
 #include "gps_events.h"
 #include "TinyGPSPlus.h"
@@ -8,6 +9,8 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include <time.h>
+#include <math.h>
+#include "esp_timer.h"
 
 //**************************************************
 // Defines
@@ -19,8 +22,9 @@
 #define BAUD_RATE 9600
 #define UART_BUF_SIZE (1024 * 2)
 #define UART_QUEUE_SIZE 20
+#define GPS_FORCE_SEND_INTERVAL_MS 5000
 
-ESP_EVENT_DEFINE_BASE(GPS_EVENTS);
+ESP_EVENT_DEFINE_BASE(GPS_EVENT);
 
 //**************************************************
 // Globals
@@ -35,6 +39,8 @@ static QueueHandle_t uart_queue = NULL;
 //**************************************************
 
 static void gps_task(void *pvParameters);
+static bool gps_has_significant_change(const gps_data_ready_payload_t *new_data, const gps_data_ready_payload_t *old_data);
+static inline int64_t now_ms();
 
 //**************************************************
 // Public Functions
@@ -87,6 +93,10 @@ static void gps_task(void *pvParameters)
   uart_event_t event;
   uint8_t buf[128];
 
+  int64_t last_send_time_ms = 0;
+  gps_data_ready_payload_t last_payload;
+  bool first = true;
+
   while (1)
   {
     if (xQueueReceive(uart_queue, (void *)&event, portMAX_DELAY))
@@ -113,11 +123,11 @@ static void gps_task(void *pvParameters)
           gps_data_ready_payload_t payload = {
               .latitude = gps.location.lat(),
               .longitude = gps.location.lng(),
-              .altitude = gps.altitude.meters(), 
+              .altitude = gps.altitude.meters(),
               .speed_kmh = gps.speed.isValid() ? gps.speed.kmph() : 0.0,
               .course_deg = gps.course.isValid() ? gps.course.deg() : 0.0,
               .satellites = gps.satellites.value(),
-              .hdop = gps.hdop.value(), 
+              .hdop = gps.hdop.value(),
               .timestamp = 0,
           };
 
@@ -136,12 +146,26 @@ static void gps_task(void *pvParameters)
             time_info.tm_hour = gps.time.hour();
             time_info.tm_min = gps.time.minute();
             time_info.tm_sec = gps.time.second();
-            time_info.tm_isdst = 0; 
+            time_info.tm_isdst = 0;
             payload.timestamp = mktime(&time_info);
           }
 
+          int64_t now = now_ms();
+
+          bool time_to_send = first || (now - last_send_time_ms >= GPS_FORCE_SEND_INTERVAL_MS);
+          bool changed = gps_has_significant_change(&payload, &last_payload);
+
+          if (!time_to_send && !changed)
+          {
+            continue;
+          }
+
+          first = false;
+          last_payload = payload;
+          last_send_time_ms = now;
+
           esp_err_t err = esp_event_post(
-              GPS_EVENTS,
+              GPS_EVENT,
               GPS_EVENT_DATA_READY,
               &payload,
               sizeof(payload),
@@ -161,4 +185,48 @@ static void gps_task(void *pvParameters)
     }
   }
   vTaskDelete(NULL);
+}
+
+static bool gps_has_significant_change(const gps_data_ready_payload_t *new_data, const gps_data_ready_payload_t *old_data)
+{
+  const double POS_THRESHOLD = 0.00001;
+  const double SPEED_THRESHOLD = 0.5;
+  const double COURSE_THRESHOLD = 2.0;
+  const double ALT_THRESHOLD = 3.0;
+
+  bool pos_changed =
+      fabs(new_data->latitude - old_data->latitude) > POS_THRESHOLD ||
+      fabs(new_data->longitude - old_data->longitude) > POS_THRESHOLD;
+
+  bool speed_changed =
+      fabs(new_data->speed_kmh - old_data->speed_kmh) > SPEED_THRESHOLD;
+
+  bool course_changed =
+      fabs(new_data->course_deg - old_data->course_deg) > COURSE_THRESHOLD;
+
+  bool altitude_changed =
+      fabs(new_data->altitude - old_data->altitude) > ALT_THRESHOLD;
+
+  // REGRA 1: posição sempre manda
+  if (pos_changed)
+    return true;
+
+  // REGRA 2: movimento real
+  if (speed_changed)
+    return true;
+
+  // REGRA 3: direção só importa se estiver movendo
+  if (course_changed && new_data->speed_kmh > 1.0)
+    return true;
+
+  // REGRA 4: altitude só se estiver em movimento leve
+  if (altitude_changed && new_data->speed_kmh > 2.0)
+    return true;
+
+  return false;
+}
+
+static inline int64_t now_ms()
+{
+  return esp_timer_get_time() / 1000;
 }
