@@ -6,6 +6,8 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_wifi.h"
+#include "esp_netif_sntp.h"
+#include <time.h>
 
 //**************************************************
 // Defines
@@ -32,6 +34,8 @@ static bool s_is_connected = false;
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
+static void time_sync_cb(struct timeval *tv);
+static void sntp_sync_task(void *pvParameters);
 
 //**************************************************
 // Public Functions
@@ -65,6 +69,13 @@ esp_err_t system_api_initialization()
     return ESP_FAIL;
   }
 
+  esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+  sntp_config.start = false;
+  sntp_config.sync_cb = time_sync_cb;
+  esp_netif_sntp_init(&sntp_config);
+  setenv("TZ", "WET0WEST,M3.5.0/1,M10.5.0", 1);
+  tzset();
+
   ESP_ERROR_CHECK(esp_mqtt_client_register_event(s_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
 
   ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
@@ -79,6 +90,45 @@ esp_err_t system_api_initialization()
 //**************************************************
 // Private Functions
 //**************************************************
+
+static void time_sync_cb(struct timeval *tv)
+{
+  ESP_LOGI(TAG, "Tempo sincronizado!");
+
+  time_t now;
+  struct tm timeinfo;
+  char buffer[64];
+
+  time(&now); // pega o tempo APÓS sincronização
+  localtime_r(&now, &timeinfo);
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+  ESP_LOGI(TAG, "Data/Hora: %s", buffer);
+}
+
+static void sntp_sync_task(void *pvParameters)
+{
+  int retry = 0;
+  const int retry_count = 10;
+
+  while (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(2000)) != ESP_OK && ++retry < retry_count)
+  {
+    ESP_LOGW(TAG, "Aguardando sincronização SNTP... (%d/%d)",
+             retry, retry_count);
+  }
+
+  if (retry == retry_count)
+  {
+    ESP_LOGE(TAG, "Falha ao sincronizar tempo via SNTP!");
+    // Trate o erro aqui
+  }
+  else
+  {
+    ESP_LOGI(TAG, "Tempo sincronizado com sucesso!");
+  }
+
+  vTaskDelete(NULL); // deleta a task ao finalizar
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
@@ -114,6 +164,10 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t eve
   switch (event_id)
   {
   case IP_EVENT_STA_GOT_IP:
+    esp_netif_sntp_start();
+
+    xTaskCreate(sntp_sync_task, "sntp_sync", 2048, NULL, 5, NULL);
+
     if (s_is_connected)
     {
       esp_mqtt_client_reconnect(s_client);
