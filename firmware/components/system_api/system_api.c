@@ -7,6 +7,7 @@
 #include "esp_err.h"
 #include "esp_wifi.h"
 #include "esp_netif_sntp.h"
+#include "esp_timer.h"
 #include <time.h>
 
 //**************************************************
@@ -16,6 +17,8 @@
 #define MQTT_BROKKER_URL CONFIG_SYSTEM_API_MQTT_BROKER_URL
 #define MQTT_USERNAME CONFIG_SYSTEM_API_MQTT_USERNAME
 #define MQTT_PASSWORD CONFIG_SYSTEM_API_MQTT_PASSWORD
+
+#define CONFIG_DEVICE_ID "tracking-one"
 
 //**************************************************
 // Globals
@@ -36,6 +39,8 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t eve
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 static void time_sync_cb(struct timeval *tv);
 static void sntp_sync_task(void *pvParameters);
+static uint32_t system_uptime_s();
+static void publish_device_info(void);
 
 //**************************************************
 // Public Functions
@@ -55,7 +60,7 @@ esp_err_t system_api_initialization()
       .session = {
           .keepalive = 60,
           .last_will = {
-              .topic = "/tracking_device/tracking-one/status",
+              .topic = "/tracking_device/" CONFIG_DEVICE_ID "/status",
               .msg = "{\"online\": false}",
               .retain = true,
               .qos = 1,
@@ -197,6 +202,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
     msg_id = esp_mqtt_client_publish(client, "/tracking_device/tracking-one/status", "{\"online\": true}", 0, 1, true);
     ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+
+    publish_device_info();
     break;
 
   case MQTT_EVENT_DISCONNECTED:
@@ -219,4 +226,58 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
   default:
     break;
   }
+}
+
+static uint32_t system_uptime_s()
+{
+  return esp_timer_get_time() / 1000000ULL;
+}
+
+static void publish_device_info(void)
+{
+  char ip[16] = "0.0.0.0";
+
+  esp_netif_ip_info_t ip_info;
+
+  esp_netif_t *netif =
+      esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+
+  if (netif &&
+      esp_netif_get_ip_info(netif, &ip_info) == ESP_OK)
+  {
+    snprintf(ip,
+             sizeof(ip),
+             IPSTR,
+             IP2STR(&ip_info.ip));
+  }
+
+  time_t now;
+  time(&now);
+
+  char payload[256];
+
+  snprintf(payload,
+           sizeof(payload),
+           "{"
+           "\"ip\":\"%s\","
+           "\"timestamp\":%lld,"
+           "\"time_on\":%lu"
+           "}",
+           ip,
+           (long long)now,
+           system_uptime_s());
+
+  char topic[128];
+
+  snprintf(topic,
+           sizeof(topic),
+           "/tracking_device/" CONFIG_DEVICE_ID "/info");
+
+  esp_mqtt_client_publish(
+      s_client,
+      topic,
+      payload,
+      0,
+      1,
+      true);
 }
