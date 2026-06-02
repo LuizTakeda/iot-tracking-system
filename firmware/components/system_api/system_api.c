@@ -23,6 +23,8 @@ static const char TAG[] = "system_api";
 
 static esp_mqtt_client_handle_t s_client = NULL;
 
+static bool s_is_connected = false;
+
 //**************************************************
 // Function Prototypes
 //**************************************************
@@ -47,7 +49,7 @@ esp_err_t system_api_initialization()
           .authentication.password = MQTT_PASSWORD,
       },
       .session = {
-          .keepalive = 5,
+          .keepalive = 60,
           .last_will = {
               .topic = "/tracking_device/tracking-one/status",
               .msg = "{\"online\": false}",
@@ -89,10 +91,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
   {
 
   case WIFI_EVENT_STA_DISCONNECTED:
-    if (s_client != NULL)
+    if (s_client == NULL || !s_is_connected)
     {
-      esp_mqtt_client_stop(s_client);
+      return;
     }
+
     esp_mqtt_client_stop(s_client);
     break;
 
@@ -111,7 +114,14 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t eve
   switch (event_id)
   {
   case IP_EVENT_STA_GOT_IP:
-    esp_mqtt_client_start(s_client);
+    if (s_is_connected)
+    {
+      esp_mqtt_client_reconnect(s_client);
+    }
+    else
+    {
+      esp_mqtt_client_start(s_client);
+    }
     break;
 
   default:
@@ -129,12 +139,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
   switch ((esp_mqtt_event_id_t)event_id)
   {
   case MQTT_EVENT_CONNECTED:
+    s_is_connected = true;
     ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
     msg_id = esp_mqtt_client_publish(client, "/tracking_device/tracking-one/status", "{\"online\": true}", 0, 1, true);
     ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
     break;
 
   case MQTT_EVENT_DISCONNECTED:
+    s_is_connected = false;
     ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
     break;
 

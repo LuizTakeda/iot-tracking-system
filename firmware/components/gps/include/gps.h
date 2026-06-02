@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include <stdbool.h>
+#include "esp_err.h"
 
 // Estrutura simples em C para exportar os dados que você quer
 typedef struct {
@@ -19,6 +20,8 @@ typedef struct {
 } dados_gps_t;
 
 /* --- FUNÇÕES EXPORTADAS EM C --- */
+
+esp_err_t gps_initialization();
 
 // Inicializa a UART do ESP32 para o GPS
 void meu_gps_init(int uart_num, int tx_pin, int rx_pin, int baud_rate);
