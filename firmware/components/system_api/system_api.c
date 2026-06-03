@@ -11,11 +11,16 @@
 
 #include "gps_events.h"
 
+#include "iot_button.h"
+#include "button_gpio.h"
+
+#include "driver/gpio.h"
+
 //**************************************************
 // Defines
 //**************************************************
 
-#define MQTT_BROKKER_URL CONFIG_SYSTEM_API_MQTT_BROKER_URL
+#define MQTT_BROKER_URL CONFIG_SYSTEM_API_MQTT_BROKER_URL
 #define MQTT_USERNAME CONFIG_SYSTEM_API_MQTT_USERNAME
 #define MQTT_PASSWORD CONFIG_SYSTEM_API_MQTT_PASSWORD
 
@@ -41,12 +46,12 @@ static bool s_time_ready = false;
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
-static void time_sync_cb(struct timeval *tv);
 static void sntp_sync_task(void *pvParameters);
 static uint32_t system_uptime_s();
 static void publish_device_info(void);
 static bool system_time_is_valid(void);
 static void gps_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
+static void button_single_click_cb(void *arg, void *usr_data);
 
 //**************************************************
 // Public Functions
@@ -56,7 +61,7 @@ esp_err_t system_api_initialization()
 {
   const esp_mqtt_client_config_t mqtt_cfg = {
       .broker = {
-          .address.uri = MQTT_BROKKER_URL,
+          .address.uri = MQTT_BROKER_URL,
           .verification.crt_bundle_attach = esp_crt_bundle_attach,
       },
       .credentials = {
@@ -82,7 +87,6 @@ esp_err_t system_api_initialization()
 
   esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
   sntp_config.start = false;
-  sntp_config.sync_cb = time_sync_cb;
   esp_netif_sntp_init(&sntp_config);
   setenv("TZ", "WET0WEST,M3.5.0/1,M10.5.0", 1);
   tzset();
@@ -114,6 +118,25 @@ esp_err_t system_api_initialization()
       NULL,
       NULL));
 
+  const button_config_t btn_cfg = {
+      .long_press_time = 1000, // ms
+      .short_press_time = 50,  // ms
+  };
+
+  const button_gpio_config_t btn_gpio_cfg = {
+      .gpio_num = GPIO_NUM_0, // GPIO do botão
+      .active_level = 0,      // 0 = active low, 1 = active high
+  };
+
+  button_handle_t btn;
+  esp_err_t ret = iot_button_new_gpio_device(&btn_cfg, &btn_gpio_cfg, &btn);
+  if (ret != ESP_OK)
+  {
+    ESP_LOGE(TAG, "Button create failed");
+  }
+
+  iot_button_register_cb(btn, BUTTON_SINGLE_CLICK, NULL, button_single_click_cb, NULL);
+
   return ESP_OK;
 }
 
@@ -127,28 +150,6 @@ static bool system_time_is_valid(void)
   time(&now);
 
   return now > 1700000000;
-}
-
-static void time_sync_cb(struct timeval *tv)
-{
-  ESP_LOGI(TAG, "Tempo sincronizado!");
-
-  s_time_ready = true;
-
-  time_t now;
-  struct tm timeinfo;
-  char buffer[64];
-
-  time(&now);
-  localtime_r(&now, &timeinfo);
-  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
-
-  ESP_LOGI(TAG, "Data/Hora: %s", buffer);
-
-  if (s_mqtt_ready)
-  {
-    publish_device_info();
-  }
 }
 
 static void sntp_sync_task(void *pvParameters)
@@ -171,6 +172,16 @@ static void sntp_sync_task(void *pvParameters)
   {
     ESP_LOGI(TAG, "Tempo sincronizado com sucesso!");
     s_time_ready = true;
+
+    time_t now;
+    struct tm timeinfo;
+    char buffer[64];
+
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+    ESP_LOGI(TAG, "Data/Hora: %s", buffer);
 
     if (s_mqtt_ready)
     {
@@ -406,7 +417,7 @@ static void gps_event_handler(void *handler_args, esp_event_base_t base, int32_t
         payload,
         0,
         0,
-        false);
+        true);
 
     ESP_LOGD(TAG, "Published state");
   }
@@ -415,4 +426,35 @@ static void gps_event_handler(void *handler_args, esp_event_base_t base, int32_t
   default:
     break;
   }
+}
+
+static void button_single_click_cb(void *arg, void *usr_data)
+{
+  char topic[128];
+
+  snprintf(topic,
+           sizeof(topic),
+           "/tracking_device/" CONFIG_DEVICE_ID "/waypoint");
+
+  char payload[128];
+
+  time_t now;
+  time(&now);
+
+  snprintf(payload,
+           sizeof(payload),
+           "{"
+           "\"timestamp\":%lld"
+           "}",
+           (long long)now);
+
+  esp_mqtt_client_publish(
+      s_client,
+      topic,
+      payload,
+      0,
+      1,
+      true);
+
+  ESP_LOGI(TAG, "Waypoint sent");
 }

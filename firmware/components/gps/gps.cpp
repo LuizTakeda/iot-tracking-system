@@ -18,7 +18,7 @@
 
 #define UART_NUM UART_NUM_2
 #define TX_PIN GPIO_NUM_17
-#define RX_PIN GPIO_NUM_16
+#define RX_PIN GPIO_NUM_13
 #define BAUD_RATE 9600
 #define UART_BUF_SIZE (1024 * 2)
 #define UART_QUEUE_SIZE 20
@@ -158,6 +158,10 @@ static void gps_task(void *pvParameters)
           if (!time_to_send && !changed)
           {
             continue;
+          }
+
+          if((now - last_send_time_ms >= GPS_FORCE_SEND_INTERVAL_MS)){
+            ESP_LOGI(TAG,"lat: %.8lf long: %.8lf", payload.latitude, payload.longitude);
           }
 
           first = false;
