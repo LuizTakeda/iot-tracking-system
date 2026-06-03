@@ -1,160 +1,340 @@
 #include "display.h"
 #include "ssd1306.h"
+
+#include "gps_events.h"
+#include "system_api_events.h"
+
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
+
 #include "esp_log.h"
+#include "esp_event.h"
+#include "esp_wifi.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_event.h"
+#include "freertos/semphr.h"
+
 #include <time.h>
-#include <math.h> // Necessário para a função fabsf()
+#include <math.h>
+#include <stdio.h>
 
 #define I2C_SCL_PIN 15
 #define I2C_SDA_PIN 4
 #define OLED_RESET_PIN 16
 
-#define I2C0_TASK_SAMPLING_RATE 5
-#define APP_TAG "MAIN"
+#define DISPLAY_REFRESH_SECONDS 5
+#define APP_TAG "DISPLAY"
 
-i2c_master_bus_handle_t i2c0_bus_hdl;
+static i2c_master_bus_handle_t i2c0_bus_hdl;
 
-void i2c0_ssd1306_task(void *pvParameters);
+/* ========================================================================= */
+/* Shared State                                                             */
+/* ========================================================================= */
 
-static void event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
-
-esp_err_t display_initialization()
+typedef struct
 {
-  // 1. Reset físico do OLED via GPIO
+  double latitude;
+  double longitude;
+  double altitude;
+
+  double speed_kmh;
+  double course_deg;
+
+  uint32_t satellites;
+  int32_t hdop;
+
+  time_t gps_timestamp;
+
+  bool wifi_connected;
+  bool mqtt_connected;
+
+} display_state_t;
+
+static display_state_t g_display_state = {0};
+static SemaphoreHandle_t g_display_mutex = NULL;
+
+/* ========================================================================= */
+/* Forward declarations                                                    */
+/* ========================================================================= */
+
+static void i2c0_ssd1306_task(void *pvParameters);
+
+static void event_handler(
+    void *handler_args,
+    esp_event_base_t base,
+    int32_t event_id,
+    void *event_data);
+
+static void display_state_set_wifi(bool connected);
+static void display_state_set_mqtt(bool connected);
+
+static void display_state_update_gps(const gps_data_ready_payload_t *gps);
+
+static display_state_t display_state_snapshot(void);
+
+/* ========================================================================= */
+/* State helpers                                                           */
+/* ========================================================================= */
+
+static void display_state_set_wifi(bool connected)
+{
+  if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(50)))
+  {
+    g_display_state.wifi_connected = connected;
+    xSemaphoreGive(g_display_mutex);
+  }
+}
+
+static void display_state_set_mqtt(bool connected)
+{
+  if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(50)))
+  {
+    g_display_state.mqtt_connected = connected;
+    xSemaphoreGive(g_display_mutex);
+  }
+}
+
+static void display_state_update_gps(const gps_data_ready_payload_t *gps)
+{
+  if (!gps) return;
+
+  if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(50)))
+  {
+    g_display_state.latitude = gps->latitude;
+    g_display_state.longitude = gps->longitude;
+    g_display_state.altitude = gps->altitude;
+
+    g_display_state.speed_kmh = gps->speed_kmh;
+    g_display_state.course_deg = gps->course_deg;
+
+    g_display_state.satellites = gps->satellites;
+    g_display_state.hdop = gps->hdop;
+
+    g_display_state.gps_timestamp = gps->timestamp;
+
+    xSemaphoreGive(g_display_mutex);
+  }
+}
+
+static display_state_t display_state_snapshot(void)
+{
+  display_state_t copy = {0};
+
+  if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(50)))
+  {
+    copy = g_display_state;
+    xSemaphoreGive(g_display_mutex);
+  }
+
+  return copy;
+}
+
+/* ========================================================================= */
+/* Initialization                                                          */
+/* ========================================================================= */
+
+esp_err_t display_initialization(void)
+{
   gpio_config_t io_conf = {
       .pin_bit_mask = (1ULL << OLED_RESET_PIN),
       .mode = GPIO_MODE_OUTPUT,
       .pull_up_en = GPIO_PULLUP_DISABLE,
       .pull_down_en = GPIO_PULLDOWN_DISABLE,
       .intr_type = GPIO_INTR_DISABLE};
-  gpio_config(&io_conf);
+
+  ESP_ERROR_CHECK(gpio_config(&io_conf));
 
   gpio_set_level(OLED_RESET_PIN, 0);
   vTaskDelay(pdMS_TO_TICKS(50));
   gpio_set_level(OLED_RESET_PIN, 1);
   vTaskDelay(pdMS_TO_TICKS(50));
 
-  // 2. Configuração do I2C
+  g_display_mutex = xSemaphoreCreateMutex();
+  if (!g_display_mutex)
+  {
+    ESP_LOGE(APP_TAG, "Mutex creation failed");
+    return ESP_FAIL;
+  }
+
   i2c_master_bus_config_t bus_config = {
       .clk_source = I2C_CLK_SRC_DEFAULT,
       .i2c_port = I2C_NUM_0,
       .scl_io_num = I2C_SCL_PIN,
       .sda_io_num = I2C_SDA_PIN,
       .glitch_ignore_cnt = 7,
-      .flags.enable_internal_pullup = true,
-  };
+      .flags.enable_internal_pullup = true};
 
-  esp_err_t ret = i2c_new_master_bus(&bus_config, &i2c0_bus_hdl);
+  ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &i2c0_bus_hdl));
 
-  if (ret != ESP_OK)
-  {
-    ESP_LOGE(APP_TAG, "Falha crítica na inicialização do I2C/Display: %s", esp_err_to_name(ret));
-    return ESP_FAIL;
-  }
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, NULL, NULL));
 
-  ESP_LOGI(APP_TAG, "I2C e Display inicializados com sucesso.");
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler, NULL, NULL));
 
-  // 3. Cria a Task no FreeRTOS para rodar o display
-  xTaskCreate(
-      i2c0_ssd1306_task,   
-      "i2c0_ssd1306_task", 
-      2048 * 2,            
-      NULL,                
-      5,                   
-      NULL                 
-  );
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      GPS_EVENT, GPS_EVENT_DATA_READY, event_handler, NULL, NULL));
+
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      SYSTEM_API, ESP_EVENT_ANY_ID, event_handler, NULL, NULL));
+
+  xTaskCreate(i2c0_ssd1306_task, "display_task", 4096, NULL, 5, NULL);
+
+  ESP_LOGI(APP_TAG, "Display initialized");
 
   return ESP_OK;
 }
 
-void i2c0_ssd1306_task(void *pvParameters)
+/* ========================================================================= */
+/* Display Task                                                            */
+/* ========================================================================= */
+
+static void i2c0_ssd1306_task(void *pvParameters)
 {
   ssd1306_config_t dev_cfg = I2C_SSD1306_128x64_CONFIG_DEFAULT;
   ssd1306_handle_t dev_hdl;
 
-  // Inicializa o display
-  esp_err_t err = ssd1306_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
-  if (err != ESP_OK || dev_hdl == NULL)
+  if (ssd1306_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl) != ESP_OK)
   {
-    ESP_LOGE(APP_TAG, "Erro ao inicializar SSD1306");
+    ESP_LOGE(APP_TAG, "SSD1306 init failed");
     vTaskDelete(NULL);
     return;
   }
 
-  // Variáveis dinâmicas (Esses valores mudarão na sua aplicação real)
-  float latitude = -23.55052;
-  float longitude = -46.63330;
-  float velocidade = 5.32; 
-  bool mqtt_conectado = true;
+  char line[17];
 
-  char buffer_linha[17]; // 16 caracteres + \0
-  time_t now;
-  struct tm timeinfo; 
-
-  for (;;)
+  while (true)
   {
-    // Limpa o display
-    ssd1306_clear_display(dev_hdl, false);
-    ssd1306_set_contrast(dev_hdl, 0xff);
+    display_state_t state = display_state_snapshot();
 
-    // --- LINHA 0: Status e Hora (Fixo 16 caracteres) ---
+    time_t now;
     time(&now);
-    localtime_r(&now, &timeinfo);
-    snprintf(buffer_linha, sizeof(buffer_linha), "Online     %02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
-    ssd1306_display_text(dev_hdl, 0, buffer_linha, false);
 
-    // --- LINHA 1: Separador ---
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+
+    bool gps_online = (state.gps_timestamp > 0) &&
+                      ((now - state.gps_timestamp) < 30);
+
+    ssd1306_clear_display(dev_hdl, false);
+    ssd1306_set_contrast(dev_hdl, 0xFF);
+
+    /* LINE 0 */
+    snprintf(line, sizeof(line),
+             "%02d:%02d S%02lu %s",
+             timeinfo.tm_hour,
+             timeinfo.tm_min,
+             (unsigned long)state.satellites,
+             state.wifi_connected ? "ON " : "OFF");
+
+    ssd1306_display_text(dev_hdl, 0, line, false);
+
+    /* LINE 1 */
     ssd1306_display_text(dev_hdl, 1, "----------------", false);
 
-    // --- LINHA 2 e 3: Latitude e Longitude Dinâmicas ---
-    // Tratamos o sinal separadamente para garantir que o preenchimento de zeros preencha 
-    // corretamente a parte numérica (3 dígitos para graus + 1 ponto + 5 decimais = 9 caracteres)
-    char sinal_lat = (latitude >= 0) ? '+' : '-';
-    snprintf(buffer_linha, sizeof(buffer_linha), "Lat:  %c%09.5f", sinal_lat, fabsf(latitude));
-    ssd1306_display_text(dev_hdl, 2, buffer_linha, false);
-    // Resultado ex: "Lat:  -023.55052" ou "Lat:  +005.12345" -> Exatamente 16 caracteres!
+    /* LINE 2 */
+    snprintf(line, sizeof(line),
+             "Lat: %c%09.5f",
+             state.latitude >= 0 ? '+' : '-',
+             fabs(state.latitude));
 
-    char sinal_long = (longitude >= 0) ? '+' : '-';
-    snprintf(buffer_linha, sizeof(buffer_linha), "Long: %c%09.5f", sinal_long, fabsf(longitude));
-    ssd1306_display_text(dev_hdl, 3, buffer_linha, false);
-    // Resultado ex: "Long: -046.63330" ou "Long: +000.01234" -> Exatamente 16 caracteres!
-    
-    // --- LINHA 5: Velocidade (Centralizada e Segura) ---
-    // %06.2f garante 3 dígitos inteiros + ponto + 2 decimais (Ex: 005.32 ou 120.45)
-    // "  %06.2f km/h " -> 2 espaços + 6 caracteres + 5 caracteres (" km/h") + 3 espaços = 16
-    // Caso a velocidade passe de 100, os espaços vazios se ajustam
-    if (velocidade < 100.0f) {
-        snprintf(buffer_linha, sizeof(buffer_linha), "   %05.2f km/h   ", velocidade);
-    } else {
-        snprintf(buffer_linha, sizeof(buffer_linha), "  %06.2f km/h   ", velocidade);
-    }
-    ssd1306_display_text(dev_hdl, 5, buffer_linha, false);
+    ssd1306_display_text(dev_hdl, 2, line, false);
 
-    // --- LINHA 6: Separador Inferior ---
-    ssd1306_display_text(dev_hdl, 6, "----------------", false);
+    /* LINE 3 */
+    snprintf(line, sizeof(line),
+             "Lon: %c%09.5f",
+             state.longitude >= 0 ? '+' : '-',
+             fabs(state.longitude));
 
-    // --- LINHA 7: Status do MQTT (Alinhado com espaços no final para somar 16) ---
-    if (mqtt_conectado)
+    ssd1306_display_text(dev_hdl, 3, line, false);
+
+    /* LINE 4 */
+    if (gps_online)
     {
-      ssd1306_display_text(dev_hdl, 7, "MQTT: CONNECTED ", false); // 16 caracteres
+      snprintf(line, sizeof(line),
+               "Sat:     %02lu",
+               (unsigned long)state.satellites);
     }
     else
     {
-      ssd1306_display_text(dev_hdl, 7, "MQTT: DISCONNECT", false); // 16 caracteres
+      snprintf(line, sizeof(line),
+               "Sat:      Lost");
     }
 
-    // Tempo de atualização (5 segundos)
-    vTaskDelay(pdMS_TO_TICKS(I2C0_TASK_SAMPLING_RATE * 1000));
-  }
+    ssd1306_display_text(dev_hdl, 4, line, false);
 
-  ssd1306_delete(dev_hdl);
-  vTaskDelete(NULL);
+    /* LINE 5 */
+    snprintf(line, sizeof(line),
+             "  %06.2f km/h",
+             state.speed_kmh);
+
+    ssd1306_display_text(dev_hdl, 5, line, false);
+
+    /* LINE 6 */
+    ssd1306_display_text(dev_hdl, 6, "----------------", false);
+
+    /* LINE 7 MQTT */
+    if (state.mqtt_connected)
+    {
+      ssd1306_display_text(dev_hdl, 7, "MQTT: ONLINE ", false);
+    }
+    else
+    {
+      ssd1306_display_text(dev_hdl, 7, "MQTT: OFFLINE", false);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(DISPLAY_REFRESH_SECONDS * 1000));
+  }
 }
 
-static void gps_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+/* ========================================================================= */
+/* Event Handler                                                          */
+/* ========================================================================= */
+
+static void event_handler(
+    void *handler_args,
+    esp_event_base_t base,
+    int32_t event_id,
+    void *event_data)
 {
+  /* WIFI */
+  if (base == WIFI_EVENT)
+  {
+    if (event_id == WIFI_EVENT_STA_START ||
+        event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
+      display_state_set_wifi(false);
+    }
+    return;
+  }
+
+  /* IP */
+  if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+  {
+    display_state_set_wifi(true);
+    return;
+  }
+
+  /* GPS */
+  if (base == GPS_EVENT && event_id == GPS_EVENT_DATA_READY)
+  {
+    display_state_update_gps(
+        (gps_data_ready_payload_t *)event_data);
+    return;
+  }
+
+  /* SYSTEM / MQTT */
+  if (base == SYSTEM_API)
+  {
+    if (event_id == SYSTEM_API_EVENT_CONNECTED)
+    {
+      display_state_set_mqtt(true);
+    }
+    else if (event_id == SYSTEM_API_EVENT_DISCONNECTED)
+    {
+      display_state_set_mqtt(false);
+    }
+    return;
+  }
 }

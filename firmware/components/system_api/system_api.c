@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "system_api.h"
+#include "system_api_events.h"
 #include "esp_crt_bundle.h"
 #include "mqtt_client.h"
 #include "esp_log.h"
@@ -25,6 +26,8 @@
 #define MQTT_PASSWORD CONFIG_SYSTEM_API_MQTT_PASSWORD
 
 #define CONFIG_DEVICE_ID "tracking-one"
+
+ESP_EVENT_DEFINE_BASE(SYSTEM_API);
 
 //**************************************************
 // Globals
@@ -273,10 +276,23 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
       publish_device_info();
     }
 
+    esp_event_post(
+        SYSTEM_API,
+        SYSTEM_API_EVENT_CONNECTED,
+        NULL,
+        0,
+        portMAX_DELAY);
+
     break;
 
   case MQTT_EVENT_DISCONNECTED:
     s_is_connected = false;
+    esp_event_post(
+        SYSTEM_API,
+        SYSTEM_API_EVENT_DISCONNECTED,
+        NULL,
+        0,
+        portMAX_DELAY);
     ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
     break;
 

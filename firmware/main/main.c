@@ -17,8 +17,8 @@ void app_main(void)
   }
   ESP_ERROR_CHECK(ret); 
 
-  ESP_ERROR_CHECK(display_initialization());
   ESP_ERROR_CHECK(wifi_initialization());
+  ESP_ERROR_CHECK(display_initialization());
   ESP_ERROR_CHECK(system_api_initialization());
   ESP_ERROR_CHECK(gps_initialization());
   ESP_ERROR_CHECK(command_interface_initialization());
