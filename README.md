@@ -1,5 +1,9 @@
 # Project Report: IoT Vehicle Tracking System
 
+<div align="center">
+  <img width="100%" alt="WhatsApp Image 2026-08-02 at 19 53 12" src="https://github.com/user-attachments/assets/e4464a97-49d9-4f87-aad7-a88ab463b095" />
+</div>
+
 ## 1. Introduction
 
 The objective of this project is to develop an IoT-based vehicle tracking system capable of collecting, transmitting, storing, and visualizing GPS location data in real time. The system monitors geographic coordinates, altitude, speed, heading, and device status, allowing users to track vehicle movements and review historical routes through a web dashboard.
